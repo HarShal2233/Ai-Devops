@@ -1,0 +1,255 @@
+🚀 DevOps AI Agent — (Using Claude)
+
+Build your first AI agent that audits AWS infrastructure using Claude (Anthropic) and LangChain on AWS CloudShell.
+
+✅ Prerequisites
+✅ AWS account with CloudShell access
+✅ Anthropic (Claude) API key
+✅ Basic knowledge of Python and AWS CLI
+
+🔑 Step 1 — Get Your Claude API Key
+Go to: https://console.anthropic.com/
+Sign in or create an account.
+Navigate to API Keys.
+Click Create Key and copy it.
+Keep the key secure for later use.
+
+☁️ Step 2 — Open AWS CloudShell
+Log in to the AWS Console.
+Click the CloudShell icon (>_) in the top-right corner.
+Wait for the terminal to initialize.
+
+📁 Step 3 — Create the Project Structure
+mkdir devops-agent && cd devops-agent
+
+# Create a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+📦 Step 4 — Install Required Packages
+pip install --upgrade pip
+pip install langchain langchain-anthropic langchain-community python-dotenv rich
+
+✅ langchain-anthropic enables integration with Claude.
+
+🔐 Step 5 — Configure Environment Variables
+
+Create a .env file to store your Claude API key securely:
+
+cat > .env << EOF
+ANTHROPIC_API_KEY=your_claude_api_key_here
+EOF
+
+Create a .gitignore file to prevent sensitive data from being committed:
+
+cat > .gitignore << EOF
+.env
+venv/
+__pycache__/
+EOF
+
+🧪 Step 6 — Test Claude Connection
+
+Create a file named test.py:
+
+cat > test.py << 'EOF'
+from dotenv import load_dotenv
+from langchain_anthropic import ChatAnthropic
+import os
+
+load_dotenv()
+
+key = os.getenv("ANTHROPIC_API_KEY")
+print(f"✅ Key loaded: {key[:10]}...hidden")
+
+llm = ChatAnthropic(
+    model="claude-3-haiku-20240307",
+    temperature=0
+)
+
+response = llm.invoke("Say hello in one word")
+print("✅ Claude works:", response.content)
+EOF
+
+Run the test:
+
+python3 test.py
+✅ Expected Output
+✅ Key loaded: sk-ant-...hidden
+✅ Claude works: Hello
+🛠️ Step 7 — Create AWS Tools (tools.py)
+cat > tools.py << 'EOF'
+import subprocess
+from langchain.tools import tool
+
+def run_aws(cmd):
+    """Run AWS CLI and filter CloudShell gRPC noise"""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    def clean(text):
+        if not text:
+            return ""
+        return "\n".join([
+            line for line in text.splitlines()
+            if "ev_epoll1_linux" not in line
+            and "epoll_wait" not in line
+            and "Bad file descriptor" not in line
+            and "event_engine" not in line
+            and "Epoll1Poller" not in line
+        ]).strip()
+
+    return clean(result.stdout) or clean(result.stderr) or "No results found"
+
+@tool
+def get_s3_buckets(_: str = "list") -> str:
+    """List all S3 buckets in the AWS account"""
+    return run_aws(["aws", "s3", "ls"])
+
+@tool
+def get_ec2_instances(_: str = "list") -> str:
+    """List all EC2 instances with their state and type"""
+    return run_aws([
+        "aws", "ec2", "describe-instances",
+        "--query", "Reservations[].Instances[].{ID:InstanceId,State:State.Name,Type:InstanceType}",
+        "--output", "table"
+    ])
+
+@tool
+def get_vpcs(_: str = "list") -> str:
+    """List all VPCs in the AWS account"""
+    return run_aws([
+        "aws", "ec2", "describe-vpcs",
+        "--query", "Vpcs[].{ID:VpcId,CIDR:CidrBlock,Default:IsDefault}",
+        "--output", "table"
+    ])
+
+@tool
+def get_iam_users(_: str = "list") -> str:
+    """List all IAM users in the AWS account"""
+    return run_aws([
+        "aws", "iam", "list-users",
+        "--query", "Users[].{User:UserName,Created:CreateDate}",
+        "--output", "table"
+    ])
+
+@tool
+def get_security_groups(_: str = "list") -> str:
+    """List all security groups in the AWS account"""
+    return run_aws([
+        "aws", "ec2", "describe-security-groups",
+        "--query", "SecurityGroups[].{ID:GroupId,Name:GroupName,VPC:VpcId}",
+        "--output", "table"
+    ])
+
+@tool
+def get_cloudwatch_alarms(_: str = "list") -> str:
+    """List all CloudWatch alarms and their states"""
+    return run_aws([
+        "aws", "cloudwatch", "describe-alarms",
+        "--query", "MetricAlarms[].{Name:AlarmName,State:StateValue,Metric:MetricName}",
+        "--output", "table"
+    ])
+EOF
+🧠 Step 8 — Create the Agent (agent.py)
+cat > agent.py << 'EOF'
+from dotenv import load_dotenv
+from langchain_anthropic import ChatAnthropic
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain import hub
+from tools import (
+    get_s3_buckets,
+    get_ec2_instances,
+    get_vpcs,
+    get_iam_users,
+    get_security_groups,
+    get_cloudwatch_alarms
+)
+
+load_dotenv()
+
+tools = [
+    get_s3_buckets,
+    get_ec2_instances,
+    get_vpcs,
+    get_iam_users,
+    get_security_groups,
+    get_cloudwatch_alarms
+]
+
+llm = ChatAnthropic(
+    model="claude-3-haiku-20240307",
+    temperature=0,
+    max_retries=3,
+    timeout=60
+)
+
+# ReAct prompt from LangChain Hub
+prompt = hub.pull("hwchase17/react")
+
+agent = create_react_agent(llm, tools, prompt)
+
+agent_executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    verbose=True,
+    max_iterations=8,
+    handle_parsing_errors=True
+)
+
+result = agent_executor.invoke({
+    "input": """
+You are a senior DevOps assistant auditing an AWS account.
+Perform the following:
+1. List all S3 buckets
+2. List all EC2 instances and their states
+3. List all VPCs
+4. Check CloudWatch alarms and their states
+5. Provide a clean infrastructure summary with any issues or warnings.
+"""
+})
+
+print("\n" + "="*50)
+print("✅ INFRASTRUCTURE SUMMARY")
+print("="*50)
+print(result["output"])
+EOF
+▶️ Step 9 — Run the DevOps AI Agent
+python3 agent.py
+🧾 Example Output
+> Entering new AgentExecutor chain...
+Thought: I should list S3 buckets first.
+Action: get_s3_buckets
+Observation: 2026-04-15 my-app-bucket
+...
+
+==================================================
+✅ INFRASTRUCTURE SUMMARY
+==================================================
+- Found 1 S3 bucket.
+- 2 EC2 instances are running.
+- Default VPC is in use.
+- No CloudWatch alarms configured (potential risk).
+📂 Final Project Structure
+devops-agent/
+├── .env
+├── .gitignore
+├── test.py
+├── tools.py
+├── agent.py
+└── venv/
+🛠️ Troubleshooting Guide
+Error	Solution
+ModuleNotFoundError	Run source venv/bin/activate
+Invalid API Key	Verify ANTHROPIC_API_KEY in .env
+Unable to locate credentials	Run aws sts get-caller-identity
+Rate limit exceeded	Wait and retry
+model not found	Ensure claude-3-haiku-20240307 is used
+🔍 How It Works
+User provides a goal → Audit AWS infrastructure.
+Claude reasons about the next step.
+Agent selects a tool (AWS CLI command).
+Tool executes and returns results.
+Claude analyzes the output.
+Final infrastructure summary is generated.
+
+This reasoning-and-action cycle is known as the ReAct (Reasoning + Acting) pattern, which forms the foundation of modern AI agents.
